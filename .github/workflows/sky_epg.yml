@@ -2,10 +2,8 @@ name: Generate Sky EPG
 
 on:
   schedule:
-    # Runs automatically at 04:00 UTC every morning
     - cron: '0 4 * * *'
   workflow_dispatch: 
-    # Allows you to click a button to run it manually
 
 jobs:
   update-sky-epg:
@@ -27,19 +25,41 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Run Sky Script (All Regions)
-        run: python sky_script.py
+      # STEP 1: The Heavy Lift
+      - name: Seed Sky Cache (London)
+        run: python sky_script.py London
 
-      - name: Commit and Push Updates
+      # STEP 2: Save the Progress
+      - name: Commit Seed Cache
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          git add sky_cache.json logos_sky/ sky_london.xml
+          git commit -m "Seed Sky Cache" || echo "No changes to commit"
+          git push
+
+      # STEP 3: Run the Rest (Lightning Fast)
+      - name: Generate Remaining Regions
+        run: |
+          # Array of all other regions (excluding London)
+          regions=(
+            "Anglia" "Cambridgeshire" "Channel Islands" "Cumbria" "East Midlands" 
+            "Henley on Thames" "London (Essex)" "London (Kent)" "London (Thames Valley)" 
+            "Meridian (East)" "Meridian (West)" "North East" "North East Midlands" 
+            "North West" "North Yorkshire" "Northern Ireland" "Oxford" 
+            "Republic of Ireland" "Scotland (Borders)" "Scotland (Central)" 
+            "Scotland (North)" "South Lakeland" "Wales" "West Dorset" 
+            "West England" "West Midlands" "Yorkshire" "Yorkshire & Lincolnshire"
+          )
           
-          # Stage the new cache, the generated XML files, and the logo folder
-          git add sky_cache.json sky_*.xml logos_sky/
-          
-          # Commit the changes (or cleanly ignore if nothing changed)
-          git commit -m "Automated Sky EPG Update" || echo "No changes to commit"
-          
-          # Push back to the main branch
+          # Loop through and generate each XML file
+          for region in "${regions[@]}"; do
+            python sky_script.py "$region"
+          done
+
+      # STEP 4: The Final Save
+      - name: Commit Final Region XMLs
+        run: |
+          git add sky_*.xml sky_cache.json logos_sky/
+          git commit -m "Update Remaining Sky Regions" || echo "No changes to commit"
           git push
