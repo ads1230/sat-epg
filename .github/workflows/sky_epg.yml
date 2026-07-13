@@ -1,0 +1,46 @@
+name: Generate Sky EPG
+
+on:
+  schedule:
+    # Runs automatically at 04:00 UTC every morning
+    - cron: '0 4 * * *'
+  workflow_dispatch: 
+    # Allows you to click a button to run it manually
+
+jobs:
+  update-sky-epg:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run Sky Script (London)
+        # Change 'London' to another region if needed, or remove it entirely to scrape ALL 29 UK regions
+        run: python sky_script.py London
+
+      - name: Commit and Push Updates
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Stage the new cache, the generated XML files, and the logo folder
+          git add sky_cache.json sky_*.xml logos_sky/
+          
+          # Commit the changes (or cleanly ignore if nothing changed)
+          git commit -m "Automated Sky EPG Update" || echo "No changes to commit"
+          
+          # Push back to the main branch
+          git push
