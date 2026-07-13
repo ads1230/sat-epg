@@ -27,9 +27,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Run Sky Script (London)
-        # Change 'London' to another region if needed, or remove it entirely to scrape ALL 29 UK regions
-        run: python sky_script.py London
+      - name: Run Sky Script (All Regions)
+        run: python sky_script.py
 
       - name: Commit and Push Updates
         run: |
