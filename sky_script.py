@@ -16,7 +16,6 @@ def log(msg):
 
 # --- Configuration ---
 DAYS = 7 
-# Fetches every single hour (0 through 23) to guarantee 100% schedule coverage
 FETCH_HOURS = range(24)  
 LOGO_DIR = "logos_sky"
 CACHE_FILE = "sky_cache.json"
@@ -104,65 +103,85 @@ def run(target_region=None):
         missing_pids, missing_logos = {}, {}
         seen_pids = set() # Prevents duplicate shows from overlapping hour blocks
 
-        # PASS 1: Build Schedule & Grab Channels
+        # PASS 1: Build Schedule & Grab Channels (PARALLEL PER DAY)
         for day in range(DAYS):
             target_date = start_of_today + timedelta(days=day)
             date_str = target_date.strftime("%Y-%m-%d")
             
+            grid_tasks = {}
             for h in FETCH_HOURS:
                 url = f"https://api-2.tvguide.co.uk/listings?platform=sky&region={nid}&view=grid&date={date_str}&hour={h}&details=true"
-                try:
-                    r = session.get(url, timeout=15)
-                    if r.status_code != 200:
-                        log(f"   [ERROR] Pass 1 Failed on Day {day+1} Hour {h}: HTTP {r.status_code}")
-                        continue
+                grid_tasks[url] = h
+
+            total_grids = len(grid_tasks)
+            completed_grids = 0
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                future_to_url = {executor.submit(session.get, url, timeout=15): url for url in grid_tasks}
+                for future in concurrent.futures.as_completed(future_to_url):
+                    url = future_to_url[future]
+                    h = grid_tasks[url]
+                    completed_grids += 1
                     
-                    data = r.json()
-                    log(f"   [INFO] Day {day+1} ({date_str}) Hour {h:02d}:00 parsed successfully.")
-                    
-                    for chan in data:
-                        cid = str(chan.get('pa_id'))
-                        if not cid: continue
+                    try:
+                        r = future.result()
+                        if r.status_code != 200:
+                            log(f"   [ERROR] Pass 1 Failed on Day {day+1} Hour {h}: HTTP {r.status_code}")
+                            continue
                         
-                        # Store channel info and EPG Number (LCN)
-                        channels[cid] = {'name': chan.get('title', 'Unknown'), 'lcn': str(chan.get('epg', ''))}
+                        data = r.json()
                         
-                        # Queue missing logos automatically
-                        logo_url = chan.get('logo_url')
-                        if logo_url:
-                            logo_path = os.path.join(LOGO_DIR, f"{cid}.png")
-                            if not os.path.exists(logo_path):
-                                missing_logos[cid] = (logo_path, logo_url)
-                                
-                        for ev in chan.get('schedules', []):
-                            pid = ev.get('pa_id')
-                            start_str = ev.get('start_at')
-                            duration_mins = ev.get('duration')
+                        for chan in data:
+                            cid = str(chan.get('pa_id'))
+                            if not cid: continue
                             
-                            if not pid or not start_str or duration_mins is None: continue
+                            channels[cid] = {'name': chan.get('title', 'Unknown'), 'lcn': str(chan.get('epg', ''))}
                             
-                            # Prevent duplicates if shows overlap into the next hour block
-                            if pid in seen_pids: continue
-                            seen_pids.add(pid)
-                            
-                            try:
-                                # Parse UTC time directly from ISO string
-                                start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-                                end_dt = start_dt + timedelta(minutes=int(duration_mins))
-                                
-                                s_time = start_dt.strftime('%Y%m%d%H%M%S +0000')
-                                e_time = end_dt.strftime('%Y%m%d%H%M%S +0000')
-                                
-                                if pid not in meta_cache:
-                                    missing_pids[pid] = pid
+                            logo_url = chan.get('logo_url')
+                            if logo_url:
+                                logo_path = os.path.join(LOGO_DIR, f"{cid}.png")
+                                if not os.path.exists(logo_path):
+                                    missing_logos[cid] = (logo_path, logo_url)
                                     
-                                progs.append({
-                                    'cid': cid, 'pid': pid, 't': ev.get('title', 'Unknown'),
-                                    'img': ev.get('image_url', ''), 's': s_time, 'e': e_time
-                                })
-                            except Exception: pass
-                except Exception as e: log(f"   [CRITICAL] Error parsing day {day+1} hour {h}: {e}")
-            
+                            for ev in chan.get('schedules', []):
+                                pid = ev.get('pa_id')
+                                start_str = ev.get('start_at')
+                                duration_mins = ev.get('duration')
+                                
+                                if not pid or not start_str or duration_mins is None: continue
+                                
+                                if pid in seen_pids: continue
+                                seen_pids.add(pid)
+                                
+                                try:
+                                    start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+                                    end_dt = start_dt + timedelta(minutes=int(duration_mins))
+                                    
+                                    s_time = start_dt.strftime('%Y%m%d%H%M%S +0000')
+                                    e_time = end_dt.strftime('%Y%m%d%H%M%S +0000')
+                                    
+                                    if pid not in meta_cache:
+                                        missing_pids[pid] = pid
+                                        
+                                    progs.append({
+                                        'cid': cid, 'pid': pid, 't': ev.get('title', 'Unknown'),
+                                        'img': ev.get('image_url', ''), 's': s_time, 'e': e_time
+                                    })
+                                except Exception: pass
+
+                    except Exception as e: log(f"   [CRITICAL] Error parsing day {day+1} hour {h}: {e}")
+
+                    # Daily Progress Bar
+                    update_iv = max(1, total_grids // 4)
+                    if completed_grids % update_iv == 0 or completed_grids == total_grids:
+                        pct = completed_grids / total_grids
+                        bar_len = 20
+                        filled = int(bar_len * pct)
+                        bar = '█' * filled + '-' * (bar_len - filled)
+                        sys.stdout.write(f"\r[{datetime.now().strftime('%H:%M:%S')}]    Day {day+1} ({date_str}): parsing hourly EPG [{bar}] {pct*100:.1f}% ({completed_grids}/{total_grids})")
+                        sys.stdout.flush()
+            print() # Print a new line after the daily progress bar completes
+
         # PASS 1.5: Download Logos
         total_logos = len(missing_logos)
         if total_logos > 0:
@@ -175,13 +194,15 @@ def run(target_region=None):
                 except Exception: pass
                 
                 completed += 1
-                update_iv = max(1, total_logos // 20)
+                update_iv = max(1, total_logos // 10)
                 if completed % update_iv == 0 or completed == total_logos:
                     pct = completed / total_logos
                     bar_len = 20
                     filled = int(bar_len * pct)
                     bar = '█' * filled + '-' * (bar_len - filled)
-                    log(f"   Logo Progress: [{bar}] {pct*100:.1f}% ({completed}/{total_logos})")
+                    sys.stdout.write(f"\r[{datetime.now().strftime('%H:%M:%S')}]    Logo Progress: [{bar}] {pct*100:.1f}% ({completed}/{total_logos})")
+                    sys.stdout.flush()
+            print()
         else:
             log("   [INFO] All channel logos are already up to date.")
 
@@ -213,11 +234,13 @@ def run(target_region=None):
                         bar_len = 20
                         filled = int(bar_len * pct)
                         bar = '█' * filled + '-' * (bar_len - filled)
-                        log(f"   Progress: [{bar}] {pct*100:.1f}% ({completed}/{total_to_fetch}) | Success: {success_count} | Blocks: {blocked_count}")
+                        sys.stdout.write(f"\r[{datetime.now().strftime('%H:%M:%S')}]    Progress: [{bar}] {pct*100:.1f}% ({completed}/{total_to_fetch}) | Success: {success_count} | Blocks: {blocked_count}")
+                        sys.stdout.flush()
                     
                     if blocked_count >= 5:
                         executor.shutdown(wait=False, cancel_futures=True)
                         break
+            print()
 
             # --- SMART CACHE PRUNING (90MB TARGET) ---
             MAX_BYTES = 90 * 1024 * 1024 
